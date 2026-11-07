@@ -94,55 +94,33 @@ class gaze_inferer(object):
         self.eyefitter.focal_length = self.flen * self.mm2px_scaling * image_scaling_factor
         self.eyefitter.pupil_radius = 2 * self.mm2px_scaling * image_scaling_factor
 
-        # Set batch-wise operation details
-        initial_frame, final_frame = 0, vid_m
-        final_batch_size = vid_m % batch_size
-        final_batch_idx = vid_m - final_batch_size
+        # Process each decoded frame exactly once, including the final partial
+        # batch. Batch boundaries follow decoded frames, not the metadata count.
         X_batch = np.zeros((batch_size, 240, 320, 3))
-        X_batch_final = np.zeros((vid_m % batch_size, 240, 320, 3))
+        frames_in_batch = 0
+        batch_start = 0
 
-        # Start looping for batch-wise processing
         for idx, frame in enumerate(vreader.nextFrame()):
-
             print("\r%s%s %s (%d/%d)" % (print_prefix, mode, video_name_root + ext, idx + 1, vid_m), end="", flush=True)
 
-            frame_preprocessed = self._preprocess_image(frame, shape_correct)
-            mini_batch_idx = idx % batch_size
-
-            # Before reaching the batch size, stack the array
-            if ((mini_batch_idx != 0) and (idx < final_batch_idx)) or (idx == 0):
-                X_batch[mini_batch_idx, :, :, :] = frame_preprocessed
-
-            # After reaching the batch size, but not the final batch, predict heatmap and fit/infer angles
-            elif (mini_batch_idx == 0) and (idx < final_batch_idx) or (idx == final_batch_idx):
+            X_batch[frames_in_batch, :, :, :] = self._preprocess_image(frame, shape_correct)
+            frames_in_batch += 1
+            if frames_in_batch == batch_size:
                 Y_batch = self.model.predict(X_batch)
                 if mode == "Fit":
-                    self._fitting_batch(X_batch=X_batch,
-                                        Y_batch=Y_batch)
+                    self._fitting_batch(X_batch=X_batch, Y_batch=Y_batch)
                 elif mode == "Infer":
-                    _, _, _ = self._infer_batch(X_batch=X_batch,
-                                                Y_batch=Y_batch,
-                                                idx=idx - final_batch_size)
+                    self._infer_batch(X_batch=X_batch, Y_batch=Y_batch, idx=batch_start)
+                batch_start += frames_in_batch
+                frames_in_batch = 0
 
-                # Renew X_batch for next batch
-                X_batch = np.zeros((batch_size, 240, 320, 3))
-                X_batch[mini_batch_idx, :, :, :] = frame_preprocessed
-
-            # Within the final batch but not yet reaching the last index, stack the array
-            elif (idx > final_batch_idx) and (idx != final_frame - 1):
-                X_batch_final[idx - final_batch_idx, :, :, :] = frame_preprocessed
-
-            # Within the final batch and reaching the last index, predict heatmap and fit/infer angles
-            elif idx == final_frame - 1:
-                X_batch_final[idx - final_batch_idx, :, :, :] = frame_preprocessed
-                Y_batch = self.model.predict(X_batch_final)
-                if mode == "Fit":
-                    self._fitting_batch(X_batch=X_batch_final,
-                                        Y_batch=Y_batch)
-                elif mode == "Infer":
-                    _, _, _ = self._infer_batch(X_batch=X_batch_final,
-                                                Y_batch=Y_batch,
-                                                idx=idx - final_batch_size)
+        if frames_in_batch:
+            X_batch_final = X_batch[:frames_in_batch]
+            Y_batch = self.model.predict(X_batch_final)
+            if mode == "Fit":
+                self._fitting_batch(X_batch=X_batch_final, Y_batch=Y_batch)
+            elif mode == "Infer":
+                self._infer_batch(X_batch=X_batch_final, Y_batch=Y_batch, idx=batch_start)
 
         if mode == "Fit":
             # Fit eyeball models. Parameters are stored as internal attributes of Eyefitter instance.
